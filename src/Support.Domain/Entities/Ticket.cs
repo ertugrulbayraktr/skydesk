@@ -1,0 +1,167 @@
+using Support.Domain.Common;
+using Support.Domain.Enums;
+using Support.Domain.Services;
+
+namespace Support.Domain.Entities;
+
+public class Ticket : BaseEntity
+{
+    public string TicketNumber { get; private set; } = null!;
+    public TicketState State { get; private set; }
+    public Priority Priority { get; private set; }
+    public TicketCategory Category { get; private set; }
+    
+    public string Subject { get; private set; } = null!;
+    public string Description { get; private set; } = null!;
+    
+    // PNR - optional (agent/internal tickets may not have PNR)
+    public string? PNR { get; private set; }
+    public string? PassengerLastName { get; private set; }
+    
+    // Ownership
+    public Guid CreatedByUserId { get; private set; }
+    public Guid? AssignedToAgentId { get; private set; }
+    
+    // SLA tracking
+    public DateTime FirstResponseDueAt { get; private set; }
+    public DateTime ResolutionDueAt { get; private set; }
+    public DateTime? FirstResponseAt { get; private set; }
+    public DateTime? ResolvedAt { get; private set; }
+    public DateTime? ClosedAt { get; private set; }
+    
+    // Optimistic concurrency
+    public byte[] RowVersion { get; private set; } = Array.Empty<byte>();
+
+    // Navigation
+    public List<TicketMessage> Messages { get; private set; } = new();
+    public List<TicketAuditEvent> AuditEvents { get; private set; } = new();
+
+    private Ticket() { } // EF Core
+
+    public Ticket(
+        string subject,
+        string description,
+        TicketCategory category,
+        Priority priority,
+        Guid createdByUserId,
+        string? pnr = null,
+        string? passengerLastName = null)
+    {
+        TicketNumber = GenerateTicketNumber();
+        Subject = subject;
+        Description = description;
+        Category = category;
+        Priority = priority;
+        State = TicketState.New;
+        CreatedByUserId = createdByUserId;
+        PNR = pnr;
+        PassengerLastName = passengerLastName;
+        
+        // SLA initialization
+        FirstResponseDueAt = DateTime.UtcNow.AddHours(2);
+        ResolutionDueAt = DateTime.UtcNow.AddHours(24);
+    }
+
+    /// <summary>
+    /// Applies AI-suggested classification. Only allowed while the ticket is
+    /// still untriaged so a late async result never overrides agent decisions.
+    /// </summary>
+    public bool ApplyClassification(TicketCategory category, Priority priority)
+    {
+        if (State != TicketState.New)
+        {
+            return false;
+        }
+
+        Category = category;
+        Priority = priority;
+        UpdateTimestamp();
+        return true;
+    }
+
+    public void Transition(TicketState newState)
+    {
+        var isValid = TicketStateMachine.IsValidTransition(State, newState);
+        if (!isValid)
+        {
+            throw new InvalidOperationException(
+                $"Invalid state transition from {State} to {newState}");
+        }
+
+        State = newState;
+        
+        if (newState == TicketState.Resolved)
+        {
+            ResolvedAt = DateTime.UtcNow;
+        }
+        
+        if (newState == TicketState.Closed)
+        {
+            ClosedAt = DateTime.UtcNow;
+        }
+
+        UpdateTimestamp();
+    }
+
+    public void Assign(Guid agentId)
+    {
+        if (State == TicketState.Closed || State == TicketState.Cancelled)
+        {
+            throw new InvalidOperationException($"Cannot assign agent to a {State} ticket");
+        }
+
+        AssignedToAgentId = agentId;
+        
+        if (State == TicketState.New || State == TicketState.Triaged)
+        {
+            Transition(TicketState.Assigned);
+            return;
+        }
+        
+        UpdateTimestamp();
+    }
+
+    public void Escalate()
+    {
+        if (Priority < Priority.P0)
+        {
+            Priority = (Priority)((int)Priority + 1);
+            UpdateTimestamp();
+        }
+    }
+
+    public void RecordFirstResponse()
+    {
+        if (!FirstResponseAt.HasValue)
+        {
+            FirstResponseAt = DateTime.UtcNow;
+            UpdateTimestamp();
+        }
+    }
+
+    public static readonly TimeSpan SlaRiskWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// SLA risk computed at query time against the supplied clock — never persisted,
+    /// so it can't go stale for tickets that aren't being mutated.
+    /// </summary>
+    public bool IsAtRisk(DateTime utcNow)
+    {
+        if (!FirstResponseAt.HasValue)
+        {
+            return (FirstResponseDueAt - utcNow) <= SlaRiskWindow;
+        }
+
+        if (!ResolvedAt.HasValue)
+        {
+            return (ResolutionDueAt - utcNow) <= SlaRiskWindow;
+        }
+
+        return false;
+    }
+
+    private static string GenerateTicketNumber()
+    {
+        return $"TKT-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString()[..8].ToUpper()}";
+    }
+}

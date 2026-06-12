@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # .slnx requires newer SDK/VS tooling; build projects directly for compatibility
+      - name: Restore
+        run: |
+          dotnet restore src/Support.Api/Support.Api.csproj
+          dotnet restore tests/Support.Application.Tests/Support.Application.Tests.csproj
+          dotnet restore tests/Support.Api.IntegrationTests/Support.Api.IntegrationTests.csproj
+
+      - name: Build
+        run: |
+          dotnet build src/Support.Api/Support.Api.csproj -c Release --no-restore
+          dotnet build tests/Support.Application.Tests/Support.Application.Tests.csproj -c Release --no-restore
+          dotnet build tests/Support.Api.IntegrationTests/Support.Api.IntegrationTests.csproj -c Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test tests/Support.Application.Tests -c Release --no-build --logger "trx"
+
+      - name: Integration tests
+        run: dotnet test tests/Support.Api.IntegrationTests -c Release --no-build --logger "trx"
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Type-check and build
+        run: npm run build

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Recurse -File | Where-Object { $_.FullName -notmatch 'node_modules|\\\\.git|__pycache__|venv|\\\\.next|dist' } | Select-Object -ExpandProperty FullName)"
+    ]
+  }
+}
